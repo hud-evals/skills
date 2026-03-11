@@ -12,6 +12,6 @@ Skills follow the [Agent Skills](https://agentskills.io/) format.
 ## Installation
 
 ```bash
-npx skills add hud-evals/hud-skills
+npx skills add hud-evals/skills
 ```
 
