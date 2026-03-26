@@ -1,27 +1,46 @@
 ---
 name: write-hud-environment
-description: Create HUD environments with tools and evaluation scenarios for AI agents. Use when asked to "create an environment", "write a HUD env", "add tools for agents", "define evaluation scenarios", "wrap my API for agents", or when building agent-callable tools with the hud-python SDK.
+description: Create HUD environments with tools, scenarios, tasks, and connectors for AI agents. Use when asked to scaffold or write a HUD environment, define @env.tool() or @env.scenario() logic, wrap existing APIs or services as agent tools, or set up local HUD development and testing with the hud-python SDK.
 license: MIT
 metadata:
   author: hud-ai
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Write a HUD Environment
 
-An environment is everything an agent can interact with -- your APIs, services, databases, wrapped as tools. It also defines how agents are evaluated through scenarios. Each environment spins up fresh for every evaluation: isolated, deterministic, reproducible.
+An environment is the harness an agent operates in. It packages tools (what the agent can do) and scenarios (how the agent is evaluated) into one deployable unit. Each deployed environment spins up fresh for every evaluation, so runs stay isolated and reproducible.
 
-## Quick Start
+## Start With The Right Workflow
 
-Scaffold a new environment:
+HUD currently has two common authoring paths. Use the template-first path for new projects, and the SDK-first path when working in an existing repo or a simple single-module environment.
+
+### Template-first path for new projects
 
 ```bash
 uv tool install hud-python --python 3.12
 hud set HUD_API_KEY=your-key-here
-hud init
+hud init my-env
+cd my-env
+hud dev --inspector
 ```
 
-This creates `env.py`, `pyproject.toml`, and `Dockerfile`. Or create manually:
+`hud init` now downloads a preset environment template. The current CLI/docs flow is centered on an environment directory with a Dockerfile, `tasks.json`, and generated source folders such as `controller/` and optional `environment/`.
+
+Typical generated structure:
+
+```text
+my-env/
+├── Dockerfile
+├── pyproject.toml
+├── tasks.json
+├── controller/
+└── environment/   # optional, depending on template
+```
+
+### SDK-first path for simple or existing repos
+
+If you are building a smaller module-driven environment or editing an older/example repo, author an `Environment` object directly:
 
 ```python
 from hud import Environment
@@ -29,79 +48,93 @@ from hud import Environment
 env = Environment("my-env")
 ```
 
-**Naming rule:** The environment name must start with a letter. It becomes a URI scheme internally (e.g. `my-env:scenario-name`), and URI schemes must begin with a letter per RFC 3986.
+Then run it explicitly with:
 
-## Project Structure
-
-A minimal environment needs three files:
-
-```
-my-env/
-├── env.py           # Environment definition (tools + scenarios)
-├── pyproject.toml   # Dependencies
-└── Dockerfile       # For deployment (optional for local dev)
+```bash
+hud dev env:env
 ```
 
-**pyproject.toml:**
+The `env:env` syntax is `module:attribute`, meaning "import module `env` and serve attribute `env`". This path is still supported, but it is no longer the only environment workflow exposed by the CLI/docs.
 
-```toml
-[project]
-name = "my-env"
-version = "0.1.0"
-requires-python = ">=3.10"
-dependencies = ["hud-python", "openai"]
+## Core SDK Model
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+Even when you start from a generated template, the core HUD model is still the same:
+
+```python
+from hud import Environment
+from hud.tools.types import EvaluationResult
+
+env = Environment("my-env")
+
+
+@env.tool()
+def search(query: str) -> str:
+    """Search the knowledge base."""
+    return db.search(query)
+
+
+@env.scenario("find-answer")
+async def find_answer(question: str):
+    answer = yield f"Find the answer to: {question}"
+    yield EvaluationResult(
+        reward=1.0 if "correct" in answer.lower() else 0.0,
+        content=f"Agent answer: {answer}",
+    )
 ```
 
 ## Tools
 
-Every tool is a function. Decorate it with `@env.tool()` and agents can call it:
+Every tool is a function an agent can call while it is solving a task. Decorate it with `@env.tool()` and HUD turns the function signature into an MCP tool schema:
 
 ```python
 @env.tool()
-def search(query: str):
+def search(query: str) -> str:
     """Search the knowledge base."""
     return db.search(query)
 
+
 @env.tool()
-async def fetch_page(url: str):
+async def fetch_page(url: str) -> str:
     """Fetch a web page and return its text content."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(url)
         return resp.text
 ```
 
-The docstring becomes the tool description. Type hints on **parameters** define the input schema. Both sync and async functions work.
+Rules of thumb:
 
-**Do not add return type annotations** to `@env.tool()` functions or `BaseTool.__call__` methods. A return type annotation generates an MCP `outputSchema` that the current SDK does not handle correctly over MCP, causing `-32600` errors.
+- The docstring becomes the tool description the agent sees.
+- Parameter type hints define the input schema.
+- Both sync and async functions work.
+- Current SDK examples and tests use return annotations. Do not carry forward older blanket "never annotate returns" advice without re-verifying against the current SDK.
 
-**To return images**, use `ContentResult` with a `BaseTool` subclass via `add_tool()`:
+For rich content such as images, return a `ContentResult` from a `BaseTool` subclass and register it with `add_tool()`:
 
 ```python
-from hud.tools.types import ContentResult
 from hud.tools.base import BaseTool
+from hud.tools.types import ContentResult
+
 
 class ScreenshotTool(BaseTool):
     async def __call__(self, url: str):
         image_b64 = capture_screenshot(url)
         return ContentResult(output="Screenshot taken", base64_image=image_b64)
 
+
 env.add_tool(ScreenshotTool(name="screenshot", description="Take a screenshot of a URL"))
 ```
 
-`__call__` must declare **explicit parameters** -- `**kwargs` is not supported.
+Keep `__call__` explicit: declare concrete parameters instead of `**kwargs`.
 
-For detailed patterns including pre-built tools, all connection types, and `ContentResult` fields, see [references/tools-and-connections.md](references/tools-and-connections.md).
+For detailed connector/tool patterns, see [references/tools-and-connections.md](references/tools-and-connections.md). Treat those examples as supporting material and verify edge cases against the current SDK when behavior matters.
 
 ## Scenarios
 
-Scenarios define what to tell the agent and how to score what it did. Two `yield` statements:
+A scenario defines the evaluation. In the current SDK, it is an async generator with two yields:
 
 ```python
 from hud.tools.types import EvaluationResult, SubScore
+
 
 @env.scenario("checkout")
 async def checkout_flow(product_name: str):
@@ -114,13 +147,12 @@ async def checkout_flow(product_name: str):
     )
 ```
 
-- First yield: sends the prompt, returns the agent's final answer
-- Second yield: an `EvaluationResult` (from `hud.tools.types`). Floats and bools also work as shorthand and get coerced to `EvaluationResult` internally, but `EvaluationResult` is the canonical type:
+- First yield: the prompt sent to the agent. The value sent back in becomes the agent's final answer.
+- Second yield: the evaluation result. `EvaluationResult` is the canonical type, though floats and bools still coerce in many cases.
 
 ```python
 from hud.tools.types import EvaluationResult, SubScore
 
-# Full structured result with subscores
 yield EvaluationResult(
     reward=0.85,
     done=True,
@@ -131,64 +163,78 @@ yield EvaluationResult(
     ],
 )
 
-# Shorthand (coerced to EvaluationResult internally)
 yield 1.0
 yield correct_answer in response
 ```
 
-Create tasks from scenarios with keyword arguments:
+Instantiate tasks from scenarios with keyword arguments:
 
 ```python
 task = env("checkout", product_name="Widget Pro")
 ```
 
-For detailed patterns including `EvaluationResult`, structured scoring, and parameterized scenarios, see [references/scenarios.md](references/scenarios.md).
+Useful current capabilities to remember:
+
+- Scenarios can require env vars.
+- Scenarios can filter which tools the agent sees with `exclude_tools`, `exclude_sources`, and `allowed_tools`.
+- The SDK supports richer answer and evaluation handling than a bare string-in/float-out loop.
+
+For detailed patterns including parameterized scenarios and scoring examples, see [references/scenarios.md](references/scenarios.md).
 
 ## Connecting Existing Services
 
-Don't rewrite your stack. Wrap what you already have:
+Do not rewrite your stack if you can wrap it:
 
 ```python
-# FastAPI app -- all routes become tools
 from my_app import app
 env.connect_fastapi(app)
 
-# OpenAPI spec -- auto-generates tools from endpoints
 env.connect_openapi("https://api.example.com/openapi.json")
 
-# Docker image -- runs as MCP server via stdio
 env.connect_image("my-service:v1")
 
-# MCP server config -- stdio or SSE
 env.connect_mcp_config({
     "my-server": {"command": "uvx", "args": ["some-mcp-server"]}
 })
 
-# Another HUD environment (deployed on hub)
 env.connect_hub("my-org/my-env", prefix="remote")
 
-# FastMCP / MCPServer -- in-process
 from my_server import mcp
 env.connect_server(mcp)
 ```
 
-## Testing Locally
+The common connector set is still:
 
-### MCP Server Mode
+- `connect_fastapi`
+- `connect_openapi`
+- `connect_image`
+- `connect_mcp_config`
+- `connect_hub`
+- `connect_server`
 
-Spawn your environment as an MCP server for Cursor, Claude Code, or any MCP client:
+## Local Development And Testing
+
+### Local dev via generated environment directory
+
+For current template-based environments, start from the environment directory and use `hud dev`:
+
+```bash
+hud dev
+hud dev -w controller -w environment --inspector
+```
+
+Use `--watch` to opt into hot reload. Without `--watch`, `hud dev` runs once without file watching.
+
+### Local dev via explicit module mode
+
+For `Environment`-based repos with an `env.py` file or similar:
 
 ```bash
 hud dev env:env
+hud dev env:env -w env.py
 ```
 
-The `env:env` syntax is `module:attribute` -- import `env.py` and serve the `env` object. Enable hot-reload with `-w`:
-
-```bash
-hud dev env:env -w env.py -w tools/
-```
-
-In Cursor's MCP settings:
+In HTTP mode, Cursor or another MCP client can connect to the local server:
 
 ```json
 {
@@ -196,9 +242,15 @@ In Cursor's MCP settings:
 }
 ```
 
-### Agent Loop
+### Evaluate locally from tasks or code
 
-Run a full agent loop locally:
+For task files generated or maintained in the environment directory:
+
+```bash
+hud eval tasks.json claude
+```
+
+For direct code-driven loops, use `hud.eval(task)`:
 
 ```python
 import hud
@@ -213,9 +265,7 @@ async with hud.eval(task) as ctx:
 print(f"Reward: {result.reward}")
 ```
 
-### Custom Agent Loop
-
-Build your own loop using format converters:
+You can also build a custom loop by converting the environment and tools into the provider's tool format and calling `ctx.call_tool()` / `ctx.submit()` yourself:
 
 ```python
 async with hud.eval(task) as ctx:
@@ -235,71 +285,19 @@ async with hud.eval(task) as ctx:
     await ctx.submit(answer or "")
 ```
 
-## Complete Example
+### Validate the deployable environment
 
-```python
-"""my-env - HUD Environment"""
+Before deployment, build locally:
 
-import asyncio
-import hud
-from hud.settings import settings
-from hud.tools.types import EvaluationResult
-from openai import AsyncOpenAI, Omit
-from hud.environment import Environment
-
-env = Environment("my-env")
-
-
-@env.tool()
-def count_letter(text: str, letter: str):
-    """Count occurrences of a letter in text."""
-    return text.lower().count(letter.lower())
-
-
-@env.scenario("count")
-async def count_scenario(sentence: str, letter: str, fmt: str = "integer"):
-    """Agent must count a letter in a sentence."""
-    answer = yield f"How many times does '{letter}' appear in: '{sentence}'? Format: {fmt}."
-
-    correct = str(sentence.lower().count(letter.lower()))
-    yield EvaluationResult(
-        reward=1.0 if correct in answer else 0.0,
-        content=f"Expected: {correct}, Got: {answer}",
-    )
-
-
-async def test():
-    client = AsyncOpenAI(
-        base_url=settings.hud_gateway_url,
-        api_key=settings.api_key,
-    )
-
-    task = env("count", sentence="Strawberry world", letter="r")
-
-    async with hud.eval(task) as ctx:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": ctx.prompt}],
-            tools=ctx.as_openai_chat_tools(),
-        )
-
-        message = response.choices[0].message
-        if message.tool_calls:
-            result = await ctx.call_tool(message.tool_calls[0])
-            answer = str(result["content"])
-        else:
-            answer = message.content
-
-        await ctx.submit(answer or "")
-
-
-if __name__ == "__main__":
-    asyncio.run(test())
+```bash
+hud build
 ```
+
+This validates the environment, analyzes the MCP surface, and writes `hud.lock.yaml`.
 
 ## What's Next
 
-- [references/tools-and-connections.md](references/tools-and-connections.md) -- detailed tool patterns and connection types
-- [references/scenarios.md](references/scenarios.md) -- scenario patterns and evaluation strategies
-- [Deploy to HUD](../deploy-hud-environment/SKILL.md) -- deploy for parallel evals and training
-- [HUD Docs](https://docs.hud.ai/quick-links/environments) -- full environment documentation
+- [references/tools-and-connections.md](references/tools-and-connections.md) for connector and tool patterns
+- [references/scenarios.md](references/scenarios.md) for scenario patterns and evaluation examples
+- [Deploy to HUD](../deploy-hud-environment/SKILL.md) for the current build/deploy flow
+- [HUD Docs](https://docs.hud.ai/platform/environments) for the live product/docs view

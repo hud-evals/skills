@@ -4,7 +4,7 @@ Detailed reference for defining evaluation scenarios in HUD environments.
 
 ## The Two-Yield Pattern
 
-Every scenario is an async generator that yields twice:
+The canonical scenario shape is an async generator with two yields:
 
 1. **First yield** -- the prompt sent to the agent. Returns the agent's submitted answer.
 2. **Second yield** -- the evaluation result (reward).
@@ -18,6 +18,8 @@ async def find_answer(question: str, expected: str):
 ```
 
 Between the two yields, the agent runs -- calling tools, reasoning, and eventually submitting an answer via `ctx.submit()`.
+
+If you omit the second yield, HUD currently defaults the evaluation result to success (`reward=1.0`, `done=True`). That behavior exists for convenience, but the explicit two-yield form is clearer and preferred for real environments.
 
 ## Scenario Parameters
 
@@ -152,10 +154,13 @@ The `@env.scenario()` decorator accepts several options:
 @env.scenario(
     name="my-task",                           # Override name (default: function name)
     description="Tests the agent's ability...", # Human-readable description
+    chat=False,                               # Multi-turn chat scenario
     required_env_vars=["OPENAI_API_KEY"],     # Required env vars (platform checks these)
     exclude_tools=["browser_*", "screenshot"], # Hide tools from agent (fnmatch patterns)
     exclude_sources=["browser"],               # Hide all tools from a connection
     allowed_tools=["browser_navigate"],        # Rescue specific tools after exclusion
+    returns=MyAnswerModel,                     # Structured final answer schema
+    enable_citations=True,                     # Ask provider to return citations
 )
 async def my_task(query: str):
     answer = yield f"Complete: {query}"
@@ -167,6 +172,49 @@ async def my_task(query: str):
 Use `exclude_tools` and `exclude_sources` to control which tools the agent sees during a scenario. The environment can still call excluded tools in its own code -- they're only hidden from the agent's tool list.
 
 Use `allowed_tools` to rescue specific tools back after broad exclusions.
+
+### Structured answers and citations
+
+Current HUD scenarios can request structured final answers and provider citations:
+
+```python
+from pydantic import BaseModel
+from hud.tools.types import AgentAnswer, EvaluationResult
+
+
+class ResearchAnswer(BaseModel):
+    summary: str
+
+
+@env.scenario("research", returns=ResearchAnswer, enable_citations=True)
+async def research(query: str):
+    answer: AgentAnswer[ResearchAnswer] = yield f"Research: {query}"
+    yield EvaluationResult(
+        reward=1.0 if answer.content.summary else 0.0,
+        content=f"Citations returned: {len(answer.citations)}",
+    )
+```
+
+When `returns=` is set, the answer passed back into the scenario is `AgentAnswer[T]` instead of a plain string:
+
+- `answer.content` holds the parsed structured object
+- `answer.raw` holds the original text response
+- `answer.citations` holds normalized provider citations when enabled
+
+### Chat scenarios
+
+Use `chat=True` for multi-turn environment-owned conversations. Chat scenarios must accept a `messages` parameter:
+
+```python
+from typing import Any
+
+
+@env.scenario("help", chat=True)
+async def help_chat(messages: list[dict[str, Any]] | None = None):
+    messages = messages or []
+    yield f"You said: {messages[-1]['content'] if messages else 'nothing yet'}"
+    yield 1.0
+```
 
 ## Running Scenarios
 

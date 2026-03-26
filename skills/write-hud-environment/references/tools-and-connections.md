@@ -14,13 +14,13 @@ from hud import Environment
 env = Environment("my-env")
 
 @env.tool()
-def search(query: str, max_results: int = 10):
+def search(query: str, max_results: int = 10) -> str:
     """Search the knowledge base and return matching documents."""
     return db.search(query, limit=max_results)
 ```
 
 Rules:
-- **Do not add return type annotations** to tool functions. A return annotation generates an MCP `outputSchema` that the current SDK does not handle correctly, causing `-32600` errors at runtime.
+- Current HUD SDK examples and tests use return annotations. Do not carry forward older blanket "never annotate returns" guidance without re-checking the current SDK.
 - The **docstring** becomes the tool description agents see -- make it clear and actionable
 - **Type hints on parameters** define the input schema -- always include them
 - **Default values** make parameters optional
@@ -33,7 +33,7 @@ Use async for I/O-bound operations:
 
 ```python
 @env.tool()
-async def fetch_page(url: str):
+async def fetch_page(url: str) -> str:
     """Fetch a web page and return its text content."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(url)
@@ -42,7 +42,7 @@ async def fetch_page(url: str):
 
 ### Returning images and mixed content
 
-For tools that return images, use `ContentResult` from `hud.tools.types` with a `BaseTool` subclass. Same rule: **no return type annotation** on `__call__`:
+For tools that return images, use `ContentResult` from `hud.tools.types` with a `BaseTool` subclass:
 
 ```python
 from hud.tools.base import BaseTool
@@ -126,7 +126,7 @@ env.add_tool(ListTool())
 
 ## Connection Methods
 
-Connect existing infrastructure instead of rewriting it. All connection methods support `prefix` to namespace tool names and `include`/`exclude` to filter tools.
+Connect existing infrastructure instead of rewriting it. `prefix` is broadly supported for namespacing, but `include` / `exclude` / `transform` are only available on some connectors.
 
 ### connect_fastapi(app)
 
@@ -147,7 +147,7 @@ env.connect_fastapi(app)
 Options:
 - `name` -- override the server name
 - `prefix` -- namespace tool names (e.g. `prefix="api"` turns `search` into `api_search`)
-- `include_hidden` -- include routes starting with `_` (default: `True`)
+- `include_hidden` -- include routes with `include_in_schema=False` (default: `True`)
 
 ### connect_hub(slug)
 
@@ -255,7 +255,7 @@ env.connect_url(
 
 ## Tool Filtering
 
-All connection methods support `include`, `exclude`, and `transform`:
+Some connection methods support `include`, `exclude`, and `transform`, especially `connect_hub()`, `connect_image()`, `connect_url()`, and `connect_mcp_config()`:
 
 ```python
 # Only expose specific tools
